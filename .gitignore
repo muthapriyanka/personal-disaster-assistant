@@ -1,0 +1,17 @@
+# Node.js
+node_modules/
+npm-debug.log
+.env
+.env.local
+.DS_Store
+
+# Logs
+logs
+*.log
+
+# Database dumps / backups
+*.sql
+*.dump
+
+# Temporary files
+tmp/
