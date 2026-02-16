@@ -42,10 +42,10 @@ async function runAlerts() {
                COALESCE((attributes->>'magnitude')::numeric, NULL) AS mag
         FROM hazard WHERE id = $1
       ),
-      joined AS (
+      -- 1. Check Saved Places
+      places AS (
         SELECT
           up.user_id,
-          up.id AS place_id,
           (
             2 * 6371 * ASIN(
               SQRT(
@@ -58,9 +58,32 @@ async function runAlerts() {
           500 AS radius_km,
           (SELECT mag FROM quake) AS magnitude
         FROM user_place up CROSS JOIN quake q
+      ),
+      -- 2. Check Live Location
+      live AS (
+        SELECT
+          ua.id AS user_id,
+          (
+            2 * 6371 * ASIN(
+              SQRT(
+                POWER(SIN((RADIANS(ua.last_lat) - RADIANS(q.qlat)) / 2), 2) +
+                COS(RADIANS(ua.last_lat)) * COS(RADIANS(q.qlat)) *
+                POWER(SIN((RADIANS(ua.last_lon) - RADIANS(q.qlon)) / 2), 2)
+              )
+            )
+          ) AS dist_km,
+          500 AS radius_km,
+          (SELECT mag FROM quake) AS magnitude
+        FROM user_account ua CROSS JOIN quake q
+        WHERE ua.last_lat IS NOT NULL AND ua.last_lon IS NOT NULL
+      ),
+      combined AS (
+        SELECT * FROM places
+        UNION
+        SELECT * FROM live
       )
-      SELECT user_id, dist_km, radius_km, magnitude
-      FROM joined
+      SELECT DISTINCT ON (user_id) user_id, dist_km, radius_km, magnitude
+      FROM combined
       WHERE dist_km <= radius_km
       `,
       params
@@ -76,7 +99,7 @@ async function runAlerts() {
           : `Earthquake detected ~${Math.round(c.dist_km)} km from your saved place.`;
 
       try {
-        await query(
+        const result = await query(
           `
           INSERT INTO alert(user_id, hazard_id, message)
           VALUES ($1, $2, $3)
@@ -84,14 +107,24 @@ async function runAlerts() {
           `,
           [c.user_id, h.id, msg]
         );
-        created++;
+        if (result.rowCount > 0) created++;
       } catch (e) {
         // ignore duplicates or transient errors
       }
     }
   }
 
-  console.log(`Alerts created: ${created}`);
+  console.log(`New alerts inserted: ${created}`);
+
+  // 4) Cleanup old alerts (> 24 hours)
+  try {
+    const cleanup = await query(`DELETE FROM alert WHERE created_at < NOW() - INTERVAL '24 hours'`);
+    if (cleanup.rowCount > 0) {
+      console.log(`Cleaned up ${cleanup.rowCount} old alerts.`);
+    }
+  } catch (e) {
+    console.error('Alert cleanup failed:', e.message);
+  }
 }
 
 if (require.main === module) {

@@ -11,14 +11,16 @@
     "ingest:usgs": "node src/ingest-usgs.js",
     "db:migrate:alerts": "node src/db-migrate-alerts.js",
     "alerts:run": "node src/alerts-run.js",
+    "db:migrate:family": "node src/db-migrate-family.js",
     "ingest:shelters": "node src/ingest-shelters.js",
     "db:migrate:shelters": "node src/db-migrate-shelters.js"
-
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "bcryptjs": "^3.0.3",
     "dotenv": "^16.4.5",
     "jsonwebtoken": "^9.0.2",
+    "node-cron": "^4.2.1",
     "node-fetch": "^2.7.0",
     "pg": "^8.16.3"
   },
