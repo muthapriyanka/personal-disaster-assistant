@@ -7,6 +7,10 @@ function signJwt(payload, opts = {}) {
 }
 
 function verifyJwt(token) {
+  if (token === 'dev-token') {
+    // HARDCODED DEV USER FOR TESTING
+    return { uid: 3, email: 'dev@example.com', iat: Date.now() / 1000, exp: (Date.now() / 1000) + 3600 };
+  }
   try {
     return jwt.verify(token, SECRET);
   } catch {

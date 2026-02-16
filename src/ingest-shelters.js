@@ -1,60 +1,130 @@
-const { query } = require('./db');
 const fetch = require('node-fetch');
+const { Pool } = require('pg');
+const dotenv = require('dotenv');
+const path = require('path');
 
+dotenv.config({ path: path.join(__dirname, '../.env') });
+
+const pool = new Pool({
+  user: process.env.DB_USER,
+  host: process.env.DB_HOST,
+  database: process.env.DB_NAME,
+  password: process.env.DB_PASSWORD,
+  port: process.env.DB_PORT,
+});
+
+const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
+// Bay Area Bounding Box
+const QUERY = `
+[out:json][timeout:25];
+(
+  node["amenity"~"community_centre|townhall|school"](37.10,-122.60,38.00,-121.50);
+  way["amenity"~"community_centre|townhall|school"](37.10,-122.60,38.00,-121.50);
+  relation["amenity"~"community_centre|townhall|school"](37.10,-122.60,38.00,-121.50);
+  node["shelter_type"="emergency"](37.10,-122.60,38.00,-121.50);
+  way["shelter_type"="emergency"](37.10,-122.60,38.00,-121.50);
+  node["social_facility"="shelter"](37.10,-122.60,38.00,-121.50);
+);
+out center;
+`;
 
 async function fetchShelters() {
-  const url = 'https://services.arcgis.com/pGfbNJoYypmNq86F/arcgis/rest/services/Open_Shelters/FeatureServer/0/query?where=1%3D1&outFields=*&f=json';
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Failed to fetch shelters: ${res.status}`);
-  const data = await res.json();
-  return data.features || [];
+  console.log('Fetching shelters from Overpass API (Bay Area)...');
+  const params = new URLSearchParams();
+  params.append('data', QUERY);
+
+  try {
+    const res = await fetch(OVERPASS_URL, {
+      method: 'POST',
+      body: params,
+      headers: {
+        'User-Agent': 'PersonalDisasterAssistant/1.0 (contact@example.com)'
+      }
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Overpass API failed: ${res.status} ${res.statusText}\nBody: ${text.substring(0, 200)}`);
+    }
+
+    const data = await res.json();
+    return data.elements || [];
+  } catch (err) {
+    throw err;
+  }
 }
 
-async function upsertShelter(s) {
-  const attrs = s.attributes;
-  const geom = s.geometry || {};
-  if (!geom.x || !geom.y) return;
+async function upsertShelter(client, node) {
+  const lat = node.lat || (node.center && node.center.lat);
+  const lon = node.lon || (node.center && node.center.lon);
 
-  const name = attrs.SHELTER_NAME || 'Unknown';
-  const address = attrs.ADDRESS || attrs.ADDRESS1 || '';
-  const lat = geom.y;
-  const lon = geom.x;
-  const capacity = attrs.CAPACITY || null;
-  const status = attrs.STATUS ? attrs.STATUS.toLowerCase() : 'open';
-  const phone = attrs.PHONE || null;
+  if (!node.tags || !lat || !lon) return;
 
-  await query(
-    `
-    INSERT INTO shelter(name, address, lat, lon, capacity, status, phone)
-    VALUES ($1,$2,$3,$4,$5,$6,$7)
-    ON CONFLICT (name, lat, lon)
-    DO UPDATE SET status = EXCLUDED.status, capacity = EXCLUDED.capacity, updated_at = now()
-    `,
-    [name, address, lat, lon, capacity, status, phone]
+  const name = node.tags.name || `${node.tags.amenity || 'Shelter'} ${node.id}`;
+  const address = [
+    node.tags['addr:housenumber'],
+    node.tags['addr:street'],
+    node.tags['addr:city'],
+    node.tags['addr:state']
+  ].filter(Boolean).join(' ') || 'Unknown Address';
+
+  const phone = node.tags.phone || node.tags['contact:phone'] || null;
+  const capacity = parseInt(node.tags.capacity, 10) || 0;
+
+  // Check existence by Name + Location (Approx)
+  const existing = await client.query(
+    `SELECT id FROM shelter 
+     WHERE (name = $1 OR (lat BETWEEN $2 - 0.0001 AND $2 + 0.0001 AND lon BETWEEN $3 - 0.0001 AND $3 + 0.0001))
+     AND type = 'shelter'`,
+    [name, lat, lon]
   );
+
+  if (existing.rows.length > 0) {
+    const id = existing.rows[0].id;
+    await client.query(
+      `UPDATE shelter SET 
+       name = $1, address = $2, lat = $3, lon = $4, 
+       capacity = $5, type = 'shelter', status = 'active', phone = $6, updated_at = NOW()
+       WHERE id = $7`,
+      [name, address, lat, lon, capacity, phone, id]
+    );
+  } else {
+    await client.query(
+      `INSERT INTO shelter (
+        name, address, lat, lon, capacity, type, status, phone
+       ) VALUES ($1, $2, $3, $4, $5, 'shelter', 'active', $6)`,
+      [name, address, lat, lon, capacity, phone]
+    );
+  }
 }
 
 async function main() {
-  console.log('Fetching FEMA/NAPSG Open Shelters…');
-  const shelters = await fetchShelters();
-  console.log(`Fetched ${shelters.length} shelters`);
-  let count = 0;
-  for (const s of shelters) {
-    try {
-      await upsertShelter(s);
-      count++;
-    } catch (err) {
-      console.error('Error saving shelter:', err.message);
+  const client = await pool.connect();
+  try {
+    const elements = await fetchShelters();
+    console.log(`Fetched ${elements.length} shelter elements.`);
+
+    let count = 0;
+    await client.query('BEGIN');
+    for (const el of elements) {
+      if (el.tags) {
+        await upsertShelter(client, el);
+        count++;
+      }
     }
+    await client.query('COMMIT');
+    console.log(`Successfully ingested ${count} shelters.`);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Error ingest shelters:', err);
+  } finally {
+    client.release();
+    await pool.end();
   }
-  console.log(`Shelters saved/updated: ${count}`);
 }
 
 if (require.main === module) {
-  main().then(() => process.exit(0)).catch(e => {
-    console.error(e);
-    process.exit(1);
-  });
+  main();
 }
 
 module.exports = { main };

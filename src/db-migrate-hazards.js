@@ -4,7 +4,7 @@ async function migrate() {
   await query(`
     CREATE TABLE IF NOT EXISTS hazard (
       id BIGSERIAL PRIMARY KEY,
-      type TEXT NOT NULL CHECK (type IN ('earthquake','flood')),
+      type TEXT NOT NULL CHECK (type IN ('earthquake','flood','wildfire','tsunami')),
       severity NUMERIC,
       occurred_at TIMESTAMPTZ NOT NULL,
       lat DOUBLE PRECISION NOT NULL,
@@ -30,7 +30,7 @@ async function migrate() {
 }
 
 if (require.main === module) {
-  migrate().then(() => process.exit(0)).catch((e)=>{console.error(e);process.exit(1);});
+  migrate().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });
 }
 
 module.exports = { migrate };
